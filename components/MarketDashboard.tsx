@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, 
   ResponsiveContainer, ComposedChart 
 } from 'recharts';
 import { 
-  Zap, MousePointer2, Loader2, Globe, AlertTriangle 
+  Zap, MousePointer2, Loader2, Globe, AlertTriangle, RefreshCw 
 } from 'lucide-react';
 
 import { MarketData } from '../types';
@@ -14,12 +14,37 @@ import { fetchLiveMarketData, generateSimulatedData } from '../services/marketSe
 import MiniCard from './MiniCard';
 import CustomTooltip from './CustomTooltip';
 
+const AUTO_REFRESH_INTERVAL = 60000; // 60 seconds
+
 const MarketDashboard: React.FC = () => {
   const [data, setData] = useState<MarketData[]>(INITIAL_DATA);
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleString());
   const [loading, setLoading] = useState<boolean>(false);
   const [statusMsg, setStatusMsg] = useState<string>("");
   const [isSimulated, setIsSimulated] = useState<boolean>(false);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  
+  const mountedRef = useRef(false);
+
+  // Initial fetch on mount
+  useEffect(() => {
+    mountedRef.current = true;
+    handleFetchData();
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // Auto refresh interval
+  useEffect(() => {
+    if (!autoRefresh) return;
+    
+    const interval = setInterval(() => {
+      if (!loading && !isSimulated) {
+        handleFetchData(true); // silent update
+      }
+    }, AUTO_REFRESH_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [autoRefresh, loading, isSimulated]);
 
   // Helper to update state with new entry (replace if today, else push)
   const updateDataState = (newEntry: MarketData) => {
@@ -38,6 +63,7 @@ const MarketDashboard: React.FC = () => {
 
   // Switch to simulation mode
   const switchToSimulation = () => {
+    if (!mountedRef.current) return;
     console.warn("Switching to simulation mode due to network error.");
     setStatusMsg("網路受限，顯示模擬數據");
     setIsSimulated(true);
@@ -46,23 +72,28 @@ const MarketDashboard: React.FC = () => {
     const newEntry = generateSimulatedData(lastEntry);
     
     updateDataState(newEntry);
-    setTimeout(() => setStatusMsg(""), 3000);
+    // Keep showing simulation updates if in sim mode
+    // We will clear the msg after 3s
+    setTimeout(() => {
+      if(mountedRef.current) setStatusMsg("");
+    }, 3000);
   };
 
   // Main fetch handler
-  const handleFetchData = async () => {
-    setLoading(true);
-    setIsSimulated(false);
-    setStatusMsg("正在連接 Proxy 伺服器...");
+  const handleFetchData = async (silent = false) => {
+    if (!silent) setLoading(true);
+    if (!silent) setIsSimulated(false);
+    if (!silent) setStatusMsg("正在連接 Proxy 伺服器...");
 
     try {
-      const liveData = await fetchLiveMarketData(setStatusMsg);
-      setStatusMsg("數據整合中...");
+      const liveData = await fetchLiveMarketData(silent ? () => {} : setStatusMsg);
+      if (!silent) setStatusMsg("數據整合中...");
 
       const todayStr = getTodayDateString();
       const lastEntry = data[data.length - 1];
 
       // Merge live prices with last known margin/short data
+      // If liveData returns 0 or null, fallback to last known to avoid graph drop to 0
       const newEntry: MarketData = {
         date: todayStr,
         twii: liveData.twii || lastEntry.twii,
@@ -72,15 +103,20 @@ const MarketDashboard: React.FC = () => {
         short: lastEntry.short
       };
 
-      updateDataState(newEntry);
-      setStatusMsg("更新成功！");
-      setTimeout(() => setStatusMsg(""), 3000);
+      if (mountedRef.current) {
+        updateDataState(newEntry);
+        setIsSimulated(false); // Recovery successful
+        if (!silent) {
+          setStatusMsg("更新成功！");
+          setTimeout(() => { if(mountedRef.current) setStatusMsg(""); }, 3000);
+        }
+      }
 
     } catch (error) {
       console.error("Fetch failed:", error);
-      switchToSimulation();
+      if (!silent) switchToSimulation();
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 
@@ -89,7 +125,7 @@ const MarketDashboard: React.FC = () => {
   const latestSpread = latestData.wtx - latestData.twii;
 
   return (
-    <div className="p-4 md:p-6 font-sans max-w-7xl mx-auto">
+    <div className="p-4 md:p-6 font-sans max-w-7xl mx-auto pb-20">
       
       {/* 標題區 */}
       <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 pb-4 border-b border-slate-800">
@@ -100,24 +136,35 @@ const MarketDashboard: React.FC = () => {
           </h1>
           <p className="text-slate-400 text-xs mt-1">期現貨價差 vs 籌碼多空動能 (Proxy 抓取版)</p>
         </div>
-        <div className="flex items-center gap-3 mt-4 md:mt-0">
-          {statusMsg && (
-             <span className={`text-xs animate-pulse font-bold flex items-center ${isSimulated ? 'text-orange-400' : 'text-green-400'}`}>
-               {isSimulated && <AlertTriangle size={12} className="mr-1" />}
-               {statusMsg}
+        <div className="flex flex-col items-end gap-2 mt-4 md:mt-0">
+          <div className="flex items-center gap-3">
+             {statusMsg && (
+                <span className={`text-xs animate-pulse font-bold flex items-center ${isSimulated ? 'text-orange-400' : 'text-green-400'}`}>
+                  {isSimulated && <AlertTriangle size={12} className="mr-1" />}
+                  {statusMsg}
+                </span>
+             )}
+             <span className="text-xs text-slate-500 font-mono hidden md:inline">
+               更新於: {lastUpdated}
              </span>
-          )}
-          <span className="text-xs text-slate-500 font-mono hidden md:inline">
-            更新於: {lastUpdated}
-          </span>
-          <button 
-            onClick={handleFetchData}
-            disabled={loading}
-            className={`p-2 bg-slate-800 hover:bg-slate-700 rounded-full transition text-blue-400 flex items-center justify-center border border-slate-700 ${loading ? 'opacity-50 cursor-not-allowed' : 'hover:border-blue-500/50'}`}
-            title="透過 Proxy 抓取最新數據"
-          >
-            {loading ? <Loader2 size={18} className="animate-spin" /> : <Globe size={18} />}
-          </button>
+             <button 
+               onClick={() => handleFetchData(false)}
+               disabled={loading}
+               className={`p-2 bg-slate-800 hover:bg-slate-700 rounded-full transition text-blue-400 flex items-center justify-center border border-slate-700 ${loading ? 'opacity-50 cursor-not-allowed' : 'hover:border-blue-500/50'}`}
+               title="透過 Proxy 抓取最新數據"
+             >
+               {loading ? <Loader2 size={18} className="animate-spin" /> : <Globe size={18} />}
+             </button>
+          </div>
+          <div className="flex items-center gap-2">
+             <button 
+               onClick={() => setAutoRefresh(!autoRefresh)}
+               className={`text-[10px] flex items-center gap-1 px-2 py-1 rounded-full border ${autoRefresh ? 'bg-green-900/30 border-green-800 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-500'}`}
+             >
+               <RefreshCw size={10} className={autoRefresh ? "animate-spin" : ""} style={{ animationDuration: '3s' }}/>
+               {autoRefresh ? '自動更新中 (60s)' : '自動更新暫停'}
+             </button>
+          </div>
         </div>
       </header>
 
