@@ -1,0 +1,5 @@
+{
+  "name": "StockTW p.",
+  "description": "A real-time financial dashboard for the Taiwan Stock Market, visualizing TWII, WTX, VIX, and margin trends using pure frontend logic.",
+  "requestFramePermissions": []
+}
